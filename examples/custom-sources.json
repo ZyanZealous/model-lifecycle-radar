@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "source_id": "company.openapi",
+      "vendor": "company",
+      "kind": "custom_schema",
+      "format": "openapi-json",
+      "url": "https://api.example.com/openapi.json",
+      "allowed_hosts": ["api.example.com"],
+      "scope": "public-docs",
+      "scope_revision": "production-schema-v1",
+      "parser_revision": "1",
+      "coverage": "Company-maintained official OpenAPI JSON; schema diffs request endpoint review."
+    }
+  ]
+}
