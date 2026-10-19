@@ -176,6 +176,8 @@ def _smoke(args) -> int:
             parsed = parse_source(source, response, now)
             parsed = resolve_followups(source, parsed, fetcher=fetcher, now=now,
                                        max_bytes=smoke_config.max_response_bytes)
+            if source.kind == "catalog" and not parsed.models:
+                raise AdapterError("empty_catalog", "catalog parser returned no model IDs")
             item.update({
                 "canonical_url": response.url, "health": "healthy",
                 "catalog_count": len(parsed.models) if source.kind == "catalog" else None,

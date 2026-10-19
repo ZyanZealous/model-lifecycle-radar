@@ -10,14 +10,16 @@ Date: 2026-10-19 (UTC). Runtime: Windows, Python 3.12. The review-fix run used n
 4. **Failed incompatible sources:** an unsuccessful collection preserves the last-good source identity with its data. Recovery under a new revision sends no old validators and emits a rebaseline reminder without model-added/removal churn.
 5. **HTTP 304:** a compatible 304 preserves the last-good snapshot and confirms one pending catalog absence. The second confirmation emits one deduplicated disappearance review, with no generic documentation event.
 6. **Scheduled cache:** workflow runs at `17 */6 * * *`; restore and save are separate, keys include `github.run_attempt`, and only state that passes `load_state` validation is cached before collection failure propagation. Reports and state artifacts upload with `always()`. Expired/missing cache still resets the observation baseline.
+7. **Smoke empty catalogs:** smoke rejects a catalog with no parsed model IDs as unhealthy `empty_catalog` / exit 2, matching collection; zero-model lifecycle/document sources remain valid.
 
 ## Commands and results
 
 | Check | Result |
 | --- | --- |
+| Empty-catalog smoke regression | RED before guard (retirement-only Mistral catalog returned exit 0); GREEN after guard (catalog unhealthy, count unset, `empty_catalog`, exit 2; lifecycle source healthy). |
 | New review regressions before fixes | 9 targeted test methods reproduced the six issues; 15 failures recorded in the ignored `.radar/red-regressions.log`. |
 | Focused regressions after fixes | 13 targeted tests passed; after the live Mistral layout exposed cards without API names, 4 affected Mistral regressions passed again. |
-| `python -m unittest discover -s tests` | 56 offline tests passed. |
+| `python -m unittest discover -s tests` | 57 offline tests passed. |
 | Editable install, CLI help, and synthetic demo | Verified during the initial implementation. The CLI command surface did not change in this fix pass; the full suite also exercises the demo. |
 | `python -m model_lifecycle_radar smoke --vendor all --out .radar/final-smoke` | 2026-10-19 21:39:54 UTC: all 6 provider catalogs and 13/13 registered sources healthy. |
 | `python -m model_lifecycle_radar collect --state .radar/final-live-state.json --watchlist watchlist.json --out .radar/final-live-collect` | 13/13 sources healthy; 1 current example-watchlist finding; 10 new events. Four were scope/parser rebaseline reminders and six were Gemini lifecycle announcements. No revised-catalog model-added/removal events. |

@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import json
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
+import model_lifecycle_radar.cli as cli
+from model_lifecycle_radar.adapters import default_sources
 from model_lifecycle_radar.cli import main
 from model_lifecycle_radar.config import load_config
+from model_lifecycle_radar.fetch import FetchResponse
 from model_lifecycle_radar.schema import RadarState, StateError
 from model_lifecycle_radar.state import save_state
 
@@ -17,6 +24,31 @@ ROOT = Path(__file__).parents[1]
 
 
 class CliTests(unittest.TestCase):
+    def test_smoke_rejects_empty_retirement_only_catalog(self):
+        sources = {source.source_id: source for source in default_sources()}
+        bodies = {
+            "mistral.catalog": (ROOT / "tests" / "fixtures" / "mistral_catalog.html").read_bytes(),
+            "mistral.lifecycle": (ROOT / "tests" / "fixtures" / "mistral_lifecycle.html").read_bytes(),
+        }
+
+        class FixtureFetcher:
+            def fetch(self, url, allowed_hosts, *, max_bytes):
+                source = next(item for item in sources.values() if item.url == url)
+                return FetchResponse(bodies[source.source_id], url, {})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            args = SimpleNamespace(config=None, vendor="mistral", out=tmp)
+            with patch.object(cli, "_fetcher", return_value=FixtureFetcher()), redirect_stdout(io.StringIO()):
+                code = cli._smoke(args)
+
+            smoke = json.loads((Path(tmp) / "smoke.json").read_text(encoding="utf-8"))
+        catalog = smoke["sources"]["mistral.catalog"]
+        self.assertEqual(code, 2)
+        self.assertEqual(catalog["health"], "unhealthy")
+        self.assertIn(catalog["catalog_count"], (None, 0))
+        self.assertEqual(catalog["error_code"], "empty_catalog")
+        self.assertEqual(smoke["sources"]["mistral.lifecycle"]["health"], "healthy")
+
     def test_demo_writes_all_versioned_reports_without_network(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "reports"
