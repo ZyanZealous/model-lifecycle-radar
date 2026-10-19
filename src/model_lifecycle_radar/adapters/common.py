@@ -5,7 +5,7 @@ import hashlib
 import html
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from html.parser import HTMLParser
 from typing import Iterable
@@ -26,6 +26,9 @@ class ParsedSnapshot:
     notices: list[NoticeRecord]
     sections: list[SectionRecord]
     normalized_hash: str
+    detail_urls: list[str] = field(default_factory=list)
+    detail_titles: dict[str, str] = field(default_factory=dict)
+    detail_fallbacks: dict[str, list[ModelRecord]] = field(default_factory=dict)
 
 
 class Node:
@@ -98,6 +101,43 @@ def node_text(node: Node, *, suppress: frozenset[str] = frozenset({"script", "st
                     visit(child)
     visit(node)
     return " ".join(" ".join("".join(pieces).split()).split())
+
+
+def node_text_parts(
+    node: Node,
+    *,
+    split_tags: frozenset[str] = frozenset({"br", "code"}),
+    suppress: frozenset[str] = frozenset({"script", "style", "sup", "svg"}),
+) -> list[str]:
+    """Return cell text fragments without joining explicit HTML ID boundaries."""
+    parts: list[str] = []
+    current: list[str] = []
+
+    def flush() -> None:
+        text = normalize_text("".join(current))
+        if text:
+            parts.append(text)
+        current.clear()
+
+    def visit(item: Node | str) -> None:
+        if isinstance(item, str):
+            current.append(item)
+        elif item.tag in suppress:
+            return
+        elif item.tag == "br":
+            flush()
+        elif item.tag in split_tags:
+            flush()
+            for child in item.children:
+                visit(child)
+            flush()
+        else:
+            for child in item.children:
+                visit(child)
+
+    visit(node)
+    flush()
+    return parts
 
 
 def direct_cells(row: Node) -> list[Node]:

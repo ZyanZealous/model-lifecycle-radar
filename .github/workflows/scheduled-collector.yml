@@ -2,7 +2,7 @@ name: Scheduled public source review
 
 on:
   schedule:
-    - cron: "17 6 * * 1"
+    - cron: "17 */6 * * *"
   workflow_dispatch:
 
 permissions:
@@ -22,10 +22,10 @@ jobs:
         with:
           python-version: "3.12"
       - name: Restore most recent branch state
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .radar/state.json
-          key: radar-state-${{ github.ref_name }}-${{ github.run_id }}
+          key: radar-state-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             radar-state-${{ github.ref_name }}-
       - name: Install public collector
@@ -50,6 +50,18 @@ jobs:
           path: reports/
           if-no-files-found: error
           retention-days: 90
+      - name: Validate state for cache
+        id: validate-state
+        if: always()
+        continue-on-error: true
+        run: |
+          python -c "from pathlib import Path; from model_lifecycle_radar.state import load_state; p = Path('.radar/state.json'); assert p.is_file(), 'state file missing'; load_state(p)"
+      - name: Save validated branch state
+        if: always() && steps.validate-state.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: .radar/state.json
+          key: radar-state-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Propagate collection status
         if: steps.collect.outcome != 'success'
         run: exit 1

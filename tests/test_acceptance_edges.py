@@ -46,6 +46,34 @@ class AcceptanceEdgeTests(unittest.TestCase):
         result2 = collect(RadarConfig((revised,)), result.state, fetcher=Redirected(), now=NOW)
         self.assertTrue(any(e.event_type == "source.rebaseline_required" for e in result2.events))
 
+    def test_failed_revision_preserves_last_good_identity_until_rebaseline(self):
+        class ResponseFetcher:
+            def __init__(self, response): self.response=response; self.headers=[]
+            def fetch(self, url, allowed_hosts, *, headers=None, **kwargs):
+                self.headers.append(dict(headers or {}))
+                if isinstance(self.response, Exception): raise self.response
+                return self.response
+
+        initial_fetcher = ResponseFetcher(FetchResponse(json_catalog("alpha"), CATALOG.url, {"ETag": '"v1"'}))
+        initial = collect(RadarConfig((CATALOG,)), RadarState.empty(NOW), fetcher=initial_fetcher, now=NOW)
+        revised = SourceSpec(**{**CATALOG.__dict__, "parser_revision": "2"})
+        failed_fetcher = ResponseFetcher(OSError("offline"))
+        failed = collect(RadarConfig((revised,)), initial.state, fetcher=failed_fetcher, now=NOW)
+        retained = failed.state.sources[CATALOG.source_id]
+        self.assertEqual(retained.health, "unhealthy")
+        self.assertEqual(retained.parser_revision, "1")
+        self.assertEqual(retained.requested_url, CATALOG.url)
+        self.assertEqual(failed_fetcher.headers, [{}])
+
+        recovery_fetcher = ResponseFetcher(FetchResponse(json_catalog("beta"), CATALOG.url, {}))
+        recovered = collect(RadarConfig((revised,)), failed.state, fetcher=recovery_fetcher, now=NOW)
+        event_types = [event.event_type for event in recovered.events]
+        self.assertEqual(recovery_fetcher.headers, [{}])
+        self.assertIn("source.rebaseline_required", event_types)
+        self.assertNotIn("model.observed", event_types)
+        self.assertNotIn("model.disappearance_review", event_types)
+        self.assertEqual(recovered.state.sources[CATALOG.source_id].parser_revision, "2")
+
     def test_one_bad_provider_does_not_abort_another(self):
         other = SourceSpec("demo.schema", "demo", "custom_schema", "https://schema.example.test/openapi.json",
                            ("schema.example.test",), "json_fingerprint", "public", "schema-v1", "1")
@@ -93,6 +121,37 @@ class AcceptanceEdgeTests(unittest.TestCase):
         self.assertEqual([m.model_id for m in record.last_good.models], ["alpha"])
         self.assertTrue(second.ok)
 
+    def test_compatible_304_confirms_pending_absence_once_without_document_change(self):
+        class ConditionalFetcher:
+            def __init__(self, response): self.response=response; self.headers=[]
+            def fetch(self, url, allowed_hosts, *, headers=None, **kwargs):
+                self.headers.append(dict(headers or {})); return self.response
+
+        config = RadarConfig((CATALOG,))
+        initial = collect(config, RadarState.empty(NOW), fetcher=ConditionalFetcher(
+            FetchResponse(json_catalog("alpha"), CATALOG.url, {"ETag": '"v1"'})
+        ), now=NOW)
+        first_absence = collect(config, initial.state, fetcher=ConditionalFetcher(
+            FetchResponse(json_catalog("beta"), CATALOG.url, {"ETag": '"v2"'})
+        ), now=NOW)
+        self.assertEqual(first_absence.state.sources[CATALOG.source_id].pending_disappearances, {"alpha": 1})
+
+        second_absence = collect(config, first_absence.state, fetcher=ConditionalFetcher(
+            FetchResponse(b"", CATALOG.url, {"ETag": '"v2"'}, 304)
+        ), now=NOW)
+        removals = [event for event in second_absence.events if event.event_type == "model.disappearance_review"]
+        self.assertEqual([event.subject for event in removals], ["alpha"])
+        record = second_absence.state.sources[CATALOG.source_id]
+        self.assertEqual(record.health, "not_modified")
+        self.assertEqual(record.pending_disappearances, {"alpha": 2})
+        self.assertEqual([model.model_id for model in record.last_good.models], ["beta"])
+        self.assertFalse(any(event.event_type.startswith("docs.") for event in second_absence.events))
+
+        repeated = collect(config, second_absence.state, fetcher=ConditionalFetcher(
+            FetchResponse(b"", CATALOG.url, {"ETag": '"v2"'}, 304)
+        ), now=NOW)
+        self.assertFalse(any(event.event_type == "model.disappearance_review" for event in repeated.events))
+
     def test_policy_change_reevaluates_saved_state_without_fetch(self):
         from model_lifecycle_radar.evaluate import Policy
         from model_lifecycle_radar.schema import Evidence, LastGoodSnapshot, ModelRecord, NoticeRecord, RadarState, SourceState
@@ -117,6 +176,25 @@ class AcceptanceEdgeTests(unittest.TestCase):
         for source in sources:
             self.assertTrue(source.url.startswith("https://"))
             self.assertIn(source.url.split("/")[2], source.allowed_hosts)
+
+    def test_scheduled_workflow_persists_validated_state_before_failure_propagation(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/scheduled-collector.yml").read_text(encoding="utf-8")
+        checks = {
+            "six-hour schedule": 'cron: "17 */6 * * *"' in workflow,
+            "separate cache restore": "actions/cache/restore@v4" in workflow,
+            "separate cache save": "actions/cache/save@v4" in workflow,
+            "attempt-specific immutable cache key": "github.run_attempt" in workflow,
+            "state validation": "load_state" in workflow,
+            "state artifact uploaded always": "name: Upload state for audit" in workflow and "if: always()" in workflow,
+            "report artifact uploaded always": "name: Upload reports" in workflow and "if: always()" in workflow,
+            "save occurs before failure propagation": (
+                "actions/cache/save@v4" in workflow
+                and workflow.index("actions/cache/save@v4") < workflow.index("name: Propagate collection status")
+            ),
+        }
+        for name, passed in checks.items():
+            with self.subTest(contract=name):
+                self.assertTrue(passed, name)
 
 
 if __name__ == "__main__":

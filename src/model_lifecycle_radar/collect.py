@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from .adapters import AdapterError, parse_source
+from .adapters import AdapterError, parse_source, resolve_followups
 from .fetch import FetchError, FetchResponse
 from .schema import (
     Event, LastGoodSnapshot, ModelRecord, RadarConfig, RadarState, SourceSpec,
@@ -82,11 +82,20 @@ def _source_error(
     state: RadarState, spec: SourceSpec, previous: SourceState | None,
     now: datetime, code: str, canonical_url: str | None = None,
 ) -> SourceState:
+    # A failed request under a changed parser/scope must not relabel old data
+    # with the new identity. Recovery then remains intentionally incompatible
+    # and establishes a fresh baseline without synthetic model churn.
+    preserve_identity = previous is not None and previous.last_good is not None and not _compatible(previous, spec)
+    identity = previous if preserve_identity else None
     return SourceState(
-        vendor=spec.vendor, kind=spec.kind, requested_url=spec.url,
-        canonical_url=canonical_url or (previous.canonical_url if previous else None),
-        scope=spec.scope, scope_revision=spec.scope_revision,
-        parser_revision=spec.parser_revision, last_attempt_at=now.astimezone(timezone.utc),
+        vendor=identity.vendor if identity else spec.vendor,
+        kind=identity.kind if identity else spec.kind,
+        requested_url=identity.requested_url if identity else spec.url,
+        canonical_url=canonical_url or (identity.canonical_url if identity else (previous.canonical_url if previous else None)),
+        scope=identity.scope if identity else spec.scope,
+        scope_revision=identity.scope_revision if identity else spec.scope_revision,
+        parser_revision=identity.parser_revision if identity else spec.parser_revision,
+        last_attempt_at=now.astimezone(timezone.utc),
         health="unhealthy", error_code=code,
         last_good=copy.deepcopy(previous.last_good) if previous else None,
         pending_disappearances=copy.deepcopy(previous.pending_disappearances) if previous else {},
@@ -178,14 +187,23 @@ def collect(config: RadarConfig, previous_state: RadarState, *, fetcher, now: da
                     raise FetchError("unexpected_not_modified", "source returned 304 without compatible last-good state")
                 if response.url != previous.canonical_url:
                     raise FetchError("canonical_url_changed", "canonical source URL changed on a cached response")
+                pending = copy.deepcopy(previous.pending_disappearances)
+                if spec.kind == "catalog":
+                    for model_id, count in sorted(pending.items()):
+                        count = min(count + 1, 2)
+                        pending[model_id] = count
+                        if count >= 2:
+                            _emit(state, emitted, now, config.event_history_limit,
+                                  _disappearance_event(spec, model_id, "prior-successful-absence"))
                 state.sources[spec.source_id] = SourceState(
                     spec.vendor, spec.kind, spec.url, response.url, spec.scope,
                     spec.scope_revision, spec.parser_revision, now.astimezone(timezone.utc),
                     "not_modified", None, copy.deepcopy(previous.last_good),
-                    copy.deepcopy(previous.pending_disappearances),
+                    pending,
                 )
                 continue
             parsed = parse_source(spec, response, now)
+            parsed = resolve_followups(spec, parsed, fetcher=fetcher, now=now, max_bytes=config.max_response_bytes)
             if spec.kind == "catalog" and not parsed.models:
                 raise AdapterError("empty_catalog", "catalog parser returned no model IDs")
             comparable = _compatible(previous, spec, response.url)

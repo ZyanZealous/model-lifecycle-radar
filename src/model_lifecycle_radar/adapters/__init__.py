@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 
 from . import anthropic, deepseek, gemini, mistral, openai, xai
-from .common import AdapterError, ParsedSnapshot, decode_response, evidence, exact_id, make_models, make_sections, snapshot
+from .common import AdapterError, ParsedSnapshot, decode_response, evidence, exact_id, make_models, make_sections, normalized_hash, snapshot
 from ..fetch import FetchResponse
 from ..schema import ModelRecord, SourceSpec
 
@@ -29,7 +30,7 @@ def default_sources() -> tuple[SourceSpec, ...]:
                    ("platform.claude.com",), "anthropic_lifecycle", "public", "anthropic-public-v1", "1",
                    "Structured model status and tentative retirement date tables; tentative dates do not trigger deadline bands."),
         SourceSpec("gemini.catalog", "gemini", "catalog", "https://ai.google.dev/gemini-api/docs/models",
-                   ("ai.google.dev",), "gemini_catalog", "public", "gemini-public-v1", "1",
+                   ("ai.google.dev",), "gemini_catalog", "public", "gemini-public-v1", "2",
                    "Model/Endpoint tables; does not represent project-specific access."),
         SourceSpec("gemini.lifecycle", "gemini", "lifecycle", "https://ai.google.dev/gemini-api/docs/deprecations",
                    ("ai.google.dev",), "gemini_lifecycle", "public", "gemini-public-v1", "1",
@@ -38,14 +39,14 @@ def default_sources() -> tuple[SourceSpec, ...]:
                    ("ai.google.dev",), "gemini_docs", "public", "gemini-public-v1", "1",
                    "Normalized official release-note sections; changes request review, not a breaking-change verdict."),
         SourceSpec("deepseek.catalog", "deepseek", "catalog", "https://api-docs.deepseek.com/quick_start/pricing",
-                   ("api-docs.deepseek.com",), "deepseek_catalog", "public", "deepseek-public-v1", "1",
-                   "Labeled MODEL and MODEL VERSION rows in the official pricing table."),
-        SourceSpec("deepseek.changes", "deepseek", "docs", "https://api-docs.deepseek.com/updates",
-                   ("api-docs.deepseek.com",), "deepseek_docs", "public", "deepseek-public-v1", "1",
-                   "Normalized official updates-page sections; no dated model retirement schema was verified."),
-        SourceSpec("mistral.catalog", "mistral", "catalog", "https://docs.mistral.ai/models",
-                   ("docs.mistral.ai",), "mistral_catalog", "public", "mistral-public-v1", "1",
-                   "API column in official model table; paired deprecation/retirement dates are parsed only when both are explicit."),
+                   ("api-docs.deepseek.com",), "deepseek_catalog", "public", "deepseek-public-v2", "2",
+                   "Callable IDs come only from the labeled MODEL row; MODEL VERSION is display metadata."),
+        SourceSpec("deepseek.changes", "deepseek", "docs", "https://api-docs.deepseek.com/updates/",
+                   ("api-docs.deepseek.com",), "deepseek_docs", "public", "deepseek-public-v2", "2",
+                   "Official Change Log title and dated entries; changes request review, not a breaking-change verdict."),
+        SourceSpec("mistral.catalog", "mistral", "catalog", "https://docs.mistral.ai/models.md",
+                   ("docs.mistral.ai",), "mistral_catalog", "public", "mistral-public-v2", "2",
+                   "Active model cards are discovered from the overview; exact IDs come from labeled API names or detail fields. Cards with neither are excluded; retired rows are separate."),
         SourceSpec("mistral.lifecycle", "mistral", "docs", "https://docs.mistral.ai/inference/model-lifecycle",
                    ("docs.mistral.ai",), "mistral_lifecycle", "public", "mistral-public-v1", "1",
                    "Lifecycle policy stages and notice-period sections; generic policy text is not a model-specific deadline."),
@@ -77,6 +78,53 @@ def parse_source(source: SourceSpec, response: FetchResponse, now) -> ParsedSnap
     if parser is None:
         raise AdapterError("unknown_parser", "no parser is registered for this source")
     return parser(source, response, now)
+
+
+def _normalized_title(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.casefold())
+
+
+def resolve_followups(source: SourceSpec, parsed: ParsedSnapshot, *, fetcher, now, max_bytes: int) -> ParsedSnapshot:
+    """Fetch official detail pages discovered by a structurally parsed overview.
+
+    The supplied fetcher is reused, so detail requests share the collection's
+    response, retry, timeout, redirect, and aggregate-byte budgets.
+    """
+    if not parsed.detail_urls:
+        return parsed
+    if source.parser != "mistral_catalog":
+        raise AdapterError("unexpected_detail_pages", "this source parser does not support detail-page follow-ups")
+    resolved: list[ModelRecord] = []
+    seen: set[str] = set()
+    for url in parsed.detail_urls:
+        response = fetcher.fetch(url, source.allowed_hosts, max_bytes=max_bytes)
+        if response.not_modified:
+            raise AdapterError("unexpected_detail_not_modified", "model detail pages have no compatible cache baseline")
+        expected = parsed.detail_titles.get(url, "")
+        actual = mistral.detail_title(response)
+        if not expected or _normalized_title(expected) != _normalized_title(actual):
+            raise AdapterError("model_detail_title_mismatch", "Mistral detail title did not match its active model row")
+        try:
+            detail_models = mistral.parse_detail(source, response, now)
+        except AdapterError as exc:
+            if exc.code != "missing_model_api_field":
+                raise
+            # Some active Mistral cards describe research/specialist models
+            # without publishing any callable API name. Only an exact ID in
+            # the overview's labeled API name cell can supply a fallback.
+            detail_models = []
+        for model in detail_models + parsed.detail_fallbacks.get(url, []):
+            if model.model_id not in seen:
+                seen.add(model.model_id)
+                resolved.append(model)
+    if not resolved:
+        raise AdapterError("empty_catalog", "official model detail pages resolved no exact API IDs")
+    parsed.models = resolved
+    parsed.normalized_hash = normalized_hash(parsed.models, parsed.notices, parsed.sections)
+    parsed.detail_urls = []
+    parsed.detail_titles = {}
+    parsed.detail_fallbacks = {}
+    return parsed
 
 
 def _parse_json_catalog(source: SourceSpec, response: FetchResponse, now) -> ParsedSnapshot:

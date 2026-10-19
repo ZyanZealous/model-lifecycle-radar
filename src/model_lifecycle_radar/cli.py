@@ -7,7 +7,7 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from .adapters import AdapterError, default_sources, parse_source
+from .adapters import AdapterError, default_sources, parse_source, resolve_followups
 from .collect import CollectionResult, collect
 from .config import load_config, load_watchlist
 from .evaluate import Policy, evaluate
@@ -174,6 +174,8 @@ def _smoke(args) -> int:
             if response.not_modified:
                 raise FetchError("unexpected_not_modified", "smoke does not have a cache baseline")
             parsed = parse_source(source, response, now)
+            parsed = resolve_followups(source, parsed, fetcher=fetcher, now=now,
+                                       max_bytes=smoke_config.max_response_bytes)
             item.update({
                 "canonical_url": response.url, "health": "healthy",
                 "catalog_count": len(parsed.models) if source.kind == "catalog" else None,

@@ -31,4 +31,6 @@ python -m model_lifecycle_radar demo --out .radar/demo-report
 
 支持来源和覆盖范围见英文 [README](README.md) 与 [验证记录](docs/verification.md)。自定义官方 JSON/OpenAPI JSON 指纹示例在 `examples/custom-sources.json`；自定义 schema 变化只要求复核，不作通用破坏性判断。
 
-当前版本只监控公开文档，不收集账号可见目录。`OPENAI_API_KEY` 不会被读取，也不需要提供。首次运行若没有状态文件，或 GitHub Actions 缓存缺失/过期，会建立新基线，无法补回错过的历史。
+DeepSeek 的可调用 ID 只取自 `MODEL` 行；`MODEL VERSION` 仅作显示名称。Mistral 会从当前模型表发现有效模型卡，精确 API 名称只取自标注的 API 字段或官方详情页；两处都未发布 ID 的卡片不会编造 ID 加入目录，历史退役记录单独解析。DeepSeek 更新来源使用带尾斜杠的 [Change Log](https://api-docs.deepseek.com/updates/)。
+
+当前版本只监控公开文档，不收集账号可见目录。`OPENAI_API_KEY` 不会被读取，也不需要提供。GitHub Actions 示例每六小时运行一次；若首次运行没有状态文件，或缓存缺失/过期，会建立新基线，无法补回错过的历史。

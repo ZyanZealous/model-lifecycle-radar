@@ -1,26 +1,18 @@
 from __future__ import annotations
 
 from .common import (
-    AdapterError, Node, code_ids, exact_id, html_sections, html_tables, make_models,
-    make_notices, make_sections, node_text, parse_explicit_date, parse_html, snapshot,
+    AdapterError, Node, exact_id, html_sections, html_tables, make_models,
+    make_notices, make_sections, node_text, node_text_parts, parse_explicit_date, parse_html, snapshot,
 )
 
 
-def _cell_id(cell: Node) -> str | None:
-    ids = code_ids(node_text(cell))
-    if ids:
-        return ids[0]
-    direct = exact_id(node_text(cell))
-    if direct:
-        return direct
-    for node in cell.descendants():
-        if node.tag != "a":
-            continue
-        href = node.attrs.get("href", "")
-        tail = href.rstrip("/").split("/")[-1]
-        if "models" in href and (identifier := exact_id(tail)):
-            return identifier
-    return None
+def _cell_ids(cell: Node) -> list[str]:
+    ids: list[str] = []
+    for part in node_text_parts(cell):
+        identifier = exact_id(part)
+        if identifier and identifier not in ids:
+            ids.append(identifier)
+    return ids
 
 
 def parse_catalog(source, response, now):
@@ -36,8 +28,7 @@ def parse_catalog(source, response, now):
         for row in data:
             if len(row) <= max(model_index, endpoint_index):
                 continue
-            model_id = _cell_id(row[endpoint_index])
-            if model_id:
+            for model_id in _cell_ids(row[endpoint_index]):
                 rows.append((model_id, node_text(row[model_index]) or None, node_text(row[0])))
     if not recognized:
         raise AdapterError("missing_catalog_structure", "model/endpoint table was not recognized")
@@ -61,18 +52,17 @@ def parse_lifecycle(source, response, now):
             if len(row) <= max(model_index, date_index):
                 continue
             deadline, qualifier = parse_explicit_date(node_text(row[date_index]))
-            model_id = _cell_id(row[model_index])
-            if not model_id or not deadline:
+            model_ids = _cell_ids(row[model_index])
+            if not model_ids or not deadline:
                 continue
-            replacement = None
-            if replacement_index is not None and len(row) > replacement_index:
-                replacement = _cell_id(row[replacement_index])
-            notices.append({
-                "model_id": model_id, "status": "retirement_announced",
-                "effective_date": deadline, "replacement": replacement,
-                "deadline_authoritative": qualifier is None, "date_qualifier": qualifier,
-                "excerpt": " | ".join(node_text(cell) for cell in row),
-            })
+            replacement_ids = _cell_ids(row[replacement_index]) if replacement_index is not None and len(row) > replacement_index else []
+            for model_id in model_ids:
+                notices.append({
+                    "model_id": model_id, "status": "retirement_announced",
+                    "effective_date": deadline, "replacement": replacement_ids[0] if replacement_ids else None,
+                    "deadline_authoritative": qualifier is None, "date_qualifier": qualifier,
+                    "excerpt": " | ".join(node_text(cell) for cell in row),
+                })
     if not recognized:
         raise AdapterError("missing_lifecycle_structure", "Model/Shutdown date table was not recognized")
     sections = make_sections(source, response, now, html_sections(root), "gemini.deprecation_sections.v1")
